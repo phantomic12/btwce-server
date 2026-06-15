@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # start.sh — launch the BTWCE Minecraft server.
 #
 # Self-bootstrapping: on first run it downloads a small runtime bundle
@@ -7,10 +7,32 @@
 #
 # Requires:
 #   - Java 17+ on the system (BTWCE 3.1.0 declares depends: java >=17 <=21)
-#   - bash 4+, curl, tar, unzip, awk
+#   - bash 4+ (we re-exec under bash because the rest of the script uses
+#     bash features — Pelican-style hosts that call `sh start.sh` still work)
+#   - curl, tar, awk, unzip
 #   - about 30 MB free disk (bundle + extracted)
 #
 # Re-runs are instant: the bundle is only downloaded if files are missing.
+
+# POSIX-sh trampoline: re-exec under bash if we're not already running
+# under it. Pelican (and some other panels) invoke this script as
+# `sh start.sh`, which on Debian is dash and rejects bashisms like
+# `set -o pipefail`. This makes the script portable.
+if [ -z "${BTWCE_STARTED:-}" ]; then
+  export BTWCE_STARTED=1
+  if [ -z "${BASH_VERSION:-}" ]; then
+    # Try bash, fall back to ash/bash anywhere on PATH
+    for _b in /bin/bash /usr/bin/bash /usr/local/bin/bash bash; do
+      if command -v "$_b" >/dev/null 2>&1 || [ -x "$_b" ]; then
+        exec "$_b" "$0" "$@"
+      fi
+    done
+    echo "ERROR: bash is required but not found. Install bash and re-run." >&2
+    exit 1
+  fi
+fi
+
+# From here on, we're guaranteed to be in bash.
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"

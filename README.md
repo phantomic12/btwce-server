@@ -87,6 +87,20 @@ Install a Java 17+ JRE and either:
 If fabric's `CrashDialog` ever wants to pop up, AWT will silently fail
 because the JVM is running in headless mode.
 
+## Running on Pelican Panel (or any `sh start.sh` host)
+
+Pelican invokes the startup script as `sh start.sh` rather than
+`/bin/bash start.sh`, so the script is parsed by whatever `/bin/sh`
+points to (dash on Debian-based Pelican images, ash on Alpine, etc.).
+That rejects bash-only syntax like `set -o pipefail`.
+
+The script handles this transparently: the first lines detect the shell
+and re-exec under `bash` if available. The same script works for:
+
+* direct invocation: `./start.sh` (or `bash start.sh`)
+* Pelican: configured to run `sh start.sh` (the default for a custom
+  startup command) — the script trampolines to bash on its own
+
 ## How the bundle works
 
 The GitHub release `v1.0.0` has a `libraries-bundle.tar.xz` asset
