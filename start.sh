@@ -1,78 +1,119 @@
 #!/usr/bin/env bash
-# start.sh — bootstrap (if needed) and launch the BTWCE Minecraft server.
+# start.sh — launch the BTWCE Minecraft server.
 #
-# On first run this script will:
-#   1. Download a portable Temurin 17 JRE into ~/java-portable/ (no apt)
-#   2. Download Mojang's official 1.6.4 server jar
-#   3. Download Legacy Fabric 0.19.3 + all required libraries from the
-#      legacy-fabric / fabric mavens
-#   4. Build a small fabric-server-launch.jar (manifest only, just sets up
-#      the classpath)
-#   5. Drop the BTWCE 3.1.0 mod into mods/ (if not already there)
-# Then it launches the server on port 25565, nogui, headless.
+# Self-bootstrapping: on first run it downloads a small runtime bundle
+# (Legacy Fabric 0.19.3 + 11 libraries + Mojang's 1.6.4 server jar) from
+# the project's GitHub release, then launches the server headless.
 #
-# Re-runs are cheap: existing files are left alone.
+# Requires:
+#   - Java 17+ on the system (BTWCE 3.1.0 declares depends: java >=17 <=21)
+#   - bash 4+, curl, tar, unzip, awk
+#   - about 30 MB free disk (bundle + extracted)
+#
+# Re-runs are instant: the bundle is only downloaded if files are missing.
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
 # --- preflight: required tools ---
-for tool in curl tar python3; do
+for tool in curl tar awk unzip; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "ERROR: '$tool' is required but not installed. Install it and re-run." >&2
     exit 1
   fi
 done
 
-JAVA_VERSION="17.0.13+11"
-JAVA_DIR="$HOME/java-portable/jdk-${JAVA_VERSION}-jre"
-JAVA_BIN="$JAVA_DIR/bin/java"
+# --- preflight: Java 17+ ---
+find_java_17() {
+  local candidate=""
+  if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
+    candidate="$JAVA_HOME/bin/java"
+  elif [[ -n "${BTWCE_JAVA:-}" && -x "$BTWCE_JAVA" ]]; then
+    candidate="$BTWCE_JAVA"
+  else
+    candidate=$(ls -d /usr/lib/jvm/*/bin/java /opt/*/bin/java 2>/dev/null \
+                  | sort -r | head -1 || true)
+  fi
+  if [[ -z "$candidate" ]] && command -v java >/dev/null 2>&1; then
+    candidate="$(command -v java)"
+  fi
+  echo "$candidate"
+}
 
-# --- 1. Java (portable Temurin 17 JRE) ---
-if [[ ! -x "$JAVA_BIN" ]]; then
-  echo "[1/4] Java not found at $JAVA_BIN"
-  echo "      downloading Temurin 17 JRE portable (~44 MB)..."
-  mkdir -p "$HOME/java-portable"
-  TMP_TAR="$(mktemp --suffix=.tar.gz)"
-  if ! curl -fL --retry 3 --connect-timeout 15 -o "$TMP_TAR" \
-    "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.13%2B11/OpenJDK17U-jre_x64_linux_hotspot_17.0.13_11.tar.gz"; then
-    echo "ERROR: failed to download Java 17. Check internet / firewall." >&2
+JAVA_BIN="$(find_java_17)"
+if [[ -z "$JAVA_BIN" ]] || [[ ! -x "$JAVA_BIN" ]]; then
+  cat >&2 <<EOF
+ERROR: No Java binary found.
+
+BTWCE 3.1.0 requires Java 17-21. Install one of:
+
+  Debian/Ubuntu:  sudo apt install openjdk-17-jre-headless
+  Fedora/RHEL:    sudo dnf install java-17-openjdk-headless
+  macOS:          brew install openjdk@17
+
+Then either set JAVA_HOME, or BTWCE_JAVA, or put java on your PATH.
+EOF
+  exit 1
+fi
+
+JAVA_MAJOR=$("$JAVA_BIN" -version 2>&1 | head -1 | sed -E 's/.*"([0-9]+).*/\1/')
+if [[ -z "$JAVA_MAJOR" || "$JAVA_MAJOR" -lt 17 ]]; then
+  echo "ERROR: $JAVA_BIN is Java $JAVA_MAJOR — BTWCE 3.1.0 requires Java 17-21." >&2
+  exit 1
+fi
+if [[ "$JAVA_MAJOR" -gt 21 ]]; then
+  echo "WARNING: $JAVA_BIN is Java $JAVA_MAJOR — BTWCE declares depends: java <=21." >&2
+fi
+echo "[1/3] Using Java: $("$JAVA_BIN" -version 2>&1 | head -1)"
+
+# --- preflight: runtime files ---
+# We need: downloads/mojang-1.6.4-server.jar, libraries/, fabric-server-launch.jar
+# The mod is already in mods/btwce-3.1.0.jar (it's in the repo).
+NEED_BUNDLE=0
+[[ -f "downloads/mojang-1.6.4-server.jar" ]] || NEED_BUNDLE=1
+[[ -d "libraries/net/fabricmc/fabric-loader" ]] || NEED_BUNDLE=1
+[[ -f "fabric-server-launch.jar" ]] || NEED_BUNDLE=1
+
+if [[ $NEED_BUNDLE -eq 1 ]]; then
+  echo "[2/3] Runtime files missing, downloading bundle from GitHub release..."
+
+  BUNDLE_VERSION="v1.0.0"
+  BUNDLE_URL="https://github.com/phantomic12/btwce-server/releases/download/${BUNDLE_VERSION}/libraries-bundle.tar.xz"
+  BUNDLE_SHA256="6267d0d942b375f12ce5eadd63c29f8643ab7f49c0647eeeac7c16632e9eabf4"
+  TMP_TAR="$(mktemp --suffix=.tar.xz)"
+
+  if ! curl -fL --retry 3 --connect-timeout 15 -o "$TMP_TAR" "$BUNDLE_URL"; then
+    echo "ERROR: failed to download $BUNDLE_URL" >&2
     rm -f "$TMP_TAR"
     exit 1
   fi
-  tar -xzf "$TMP_TAR" -C "$HOME/java-portable"
-  rm -f "$TMP_TAR"
-  if [[ ! -x "$JAVA_BIN" ]]; then
-    echo "ERROR: java binary not at expected path after extraction." >&2
-    ls "$HOME/java-portable" >&2
+
+  # Verify checksum (sha256sum is part of coreutils, always present)
+  if ! echo "$BUNDLE_SHA256  $TMP_TAR" | sha256sum -c - >/dev/null 2>&1; then
+    echo "ERROR: bundle checksum mismatch — refusing to extract" >&2
+    rm -f "$TMP_TAR"
     exit 1
   fi
-  echo "      ok: $("$JAVA_BIN" -version 2>&1 | head -1)"
-fi
 
-# --- 2. Mojang server jar + fabric libraries + BTWCE mod ---
-NEED_BOOTSTRAP=0
-[[ ! -f "downloads/mojang-1.6.4-server.jar" ]] && NEED_BOOTSTRAP=1
-[[ ! -d "libraries/net/fabricmc/fabric-loader" ]] && NEED_BOOTSTRAP=1
-[[ ! -f "mods/btwce-3.1.0.jar" ]] && NEED_BOOTSTRAP=1
-if [[ $NEED_BOOTSTRAP -eq 1 ]]; then
-  echo "[2/4] Bootstrap needed, running bootstrap.py..."
-  python3 bootstrap.py
+  echo "  extracting..."
+  tar -xJf "$TMP_TAR"
+  rm -f "$TMP_TAR"
+  echo "  done."
 else
-  echo "[2/4] Bootstrap state complete, skipping."
+  echo "[2/3] Runtime files present, skipping download."
 fi
 
-# --- 3. Launch jar (manifest with folded classpath) ---
-if [[ ! -f "fabric-server-launch.jar" ]]; then
-  echo "[3/4] Rebuilding fabric-server-launch.jar..."
-  python3 rebuild-launch-jar.py
-else
-  echo "[3/4] fabric-server-launch.jar present, skipping."
-fi
+# Sanity check: if the launch jar is missing for some reason, fail loud
+for f in downloads/mojang-1.6.4-server.jar fabric-server-launch.jar mods/btwce-3.1.0.jar; do
+  if [[ ! -f "$f" ]]; then
+    echo "ERROR: required file missing after bootstrap: $f" >&2
+    exit 1
+  fi
+done
 
-# --- 4. Launch ---
-echo "[4/4] Starting BTWCE server (MC 1.6.4 + Legacy Fabric 0.19.3 + BTWCE 3.1.0)..."
+# --- launch ---
+echo "[3/3] Starting BTWCE server (MC 1.6.4 + Legacy Fabric 0.19.3 + BTWCE 3.1.0)..."
 echo "      console is in this terminal. Type 'help' for commands. Ctrl+C stops."
 echo
 mkdir -p logs
