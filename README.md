@@ -10,17 +10,22 @@ A one-command self-bootstrapping Minecraft 1.6.4 server running
 That's it. `start.sh` will:
 
 1. Find a Java 17+ binary on the system
-2. Download a runtime bundle (~14 MB) from the GitHub release
-   (Legacy Fabric + 11 libraries + Mojang's 1.6.4 server jar + the
-   manifest-only launch jar)
-3. Download the BTWCE mod jar (~46 MB) from the Modrinth CDN
+2. Download the Mojang 1.6.4 server jar (~6 MB) from
+   `launcher.mojang.com` (SHA1 is the URL path)
+3. Download 11 library jars (~10 MB total) from the legacy-fabric and
+   fabricmc maven repos — Legacy Fabric 0.19.3, sponge-mixin,
+   intermediary, the lwjgl natives, and the asm tree. Each one is
+   sha1-verified against the `.sha1` sidecar served by the same maven
+   repo.
+4. Download the BTWCE mod jar (~46 MB) from the Modrinth CDN
    (the same upstream release published on Modrinth — see
-   <https://modrinth.com/mod/btwce/versions>)
-4. Verify both downloads' checksums
-5. Extract the bundle and launch the server on port 25565, headless
+   <https://modrinth.com/mod/btwce/versions>), sha512-verified against
+   the hash Modrinth publishes for that version.
+5. Launch the server on port 25565, headless, with the libraries on
+   the classpath.
 
-Re-runs are instant — the bundle and the mod are each only downloaded
-once, then kept locally.
+Re-runs are instant — every file is only re-downloaded if it's
+missing from disk.
 
 The BTWCE mod is **not** committed in the repo; it lives only in
 `mods/btwce-3.1.0.jar` after a successful bootstrap, and is
@@ -31,7 +36,7 @@ re-downloaded by `start.sh` whenever that file is missing.
 | | |
 |---|---|
 | Minecraft | 1.6.4 |
-| Mod loader | Legacy Fabric 0.19.3 (pinned in v1.0.0 release) |
+| Mod loader | Legacy Fabric 0.19.3 (pinned in start.sh) |
 | Mod | Better Than Wolves: Community Edition 3.1.0 |
 | Java | Whatever you have installed (must be 17-21) |
 | RAM default | 1G min, 4G max (edit `start.sh` to change) |
@@ -41,7 +46,7 @@ re-downloaded by `start.sh` whenever that file is missing.
 ## Files in this repo
 
 ```
-start.sh               # one-shot: download bundle if needed, then launch
+start.sh               # one-shot: download every runtime file if needed, then launch
 console.sh             # same as start.sh, interactive console
 stop.sh                # graceful shutdown (RCON + signals)
 backup.sh              # tarball world/ into backups/ (prune to 24)
@@ -52,14 +57,15 @@ README.md
 LICENSE                # MIT
 ```
 
-Files **not** in the repo (downloaded on first run by `start.sh`):
+Files **not** in the repo (downloaded on first run by `start.sh`,
+straight from each project's source — no release tarball):
 
 ```
-# from the GitHub release (the runtime bundle)
+# from launcher.mojang.com (1.6.4 server jar, SHA1 is the URL path)
 downloads/mojang-1.6.4-server.jar
-libraries/             # fabric loader + transitive deps
-fabric-server-launch.jar
-install-info.json
+
+# from maven.fabricmc.net and maven.legacyfabric.net (11 jars)
+libraries/
 
 # from the Modrinth CDN (the mod)
 mods/btwce-3.1.0.jar
@@ -111,38 +117,53 @@ and re-exec under `bash` if available. The same script works for:
 
 ## How the bootstrap works
 
-`start.sh` does two independent fetches on first run, each with a
-versioned checksum, and only re-fetches when the local file is missing.
+`start.sh` does three independent fetches on first run, each with a
+checksum, and only re-fetches when the local file is missing.
 
-**1. Runtime bundle — from the GitHub release**
+**1. Mojang server jar — from `launcher.mojang.com`**
 
-The GitHub release `v1.0.0` has a `libraries-bundle.tar.xz` asset
-containing the runtime files:
+`https://launcher.mojang.com/v1/objects/050f93c1f3fe9e2052398f7bd6aca10c63d64a87/server.jar`
+
+Mojang distributes by content-addressed storage, so the SHA1 is the
+URL path. `start.sh` pins that SHA1 and verifies the download
+against it. To upgrade to a different MC version, find the new
+1.6.4-compatible server jar's URL/SHA1 on
+<https://launcher.mojang.com/mc/game/version_manifest_v2.json> and
+bump `MOJANG_URL` and `MOJANG_SHA1` at the top of `start.sh`.
+
+**2. Libraries — from the legacy-fabric and fabricmc maven repos**
+
+11 jars in total: the fabric loader, sponge-mixin, intermediary,
+lwjgl + the lwjgl linux natives, and the 5 asm tree jars. The
+list is in the `LIBS=(...)` block at the top of `start.sh`, with
+each entry as a `(maven_host, local_path)` pair. The download URL
+is `https://maven.${host}/${local_path_minus_libraries_prefix}`,
+and the SHA1 is fetched from the maven repo's `.sha1` sidecar at
+`${url}.sha1`. To upgrade a library, change the version segment
+in its `LIBS` entry.
+
+Note: `maven.legacyfabric.net` 302-redirects to
+`repo.legacyfabric.net/legacyfabric/...` for every artifact. `curl
+-fL` follows the redirect transparently.
+
+**3. BTWCE mod — from the Modrinth CDN**
 
 ```
-libraries/             # Legacy Fabric 0.19.3 + 11 transitive deps
-downloads/mojang-1.6.4-server.jar
-fabric-server-launch.jar  # 485-byte manifest-only jar with folded Class-Path
-install-info.json
+https://cdn.modrinth.com/data/PiC4CKoa/versions/Pbz5N4Ul/btwce-3.1.0.jar
 ```
 
-On first run, `start.sh` downloads this bundle, sha256-verifies it
-against the embedded checksum, and `tar -xJf`s it in place.
-
-**2. BTWCE mod — from the Modrinth CDN**
-
-The mod is fetched directly from
-`https://cdn.modrinth.com/data/PiC4CKoa/versions/Pbz5N4Ul/btwce-3.1.0.jar`
-(the same file Modrinth publishes for
-<https://modrinth.com/mod/btwce/version/3.1.0>) and dropped into
-`mods/btwce-3.1.0.jar`. The download is sha512-verified against the
-hash Modrinth publishes for that version. To upgrade, find the new
-version on <https://modrinth.com/mod/btwce/versions>, then bump
+Same as the upstream release published on
+<https://modrinth.com/mod/btwce/version/3.1.0>. The download is
+sha512-verified against the hash Modrinth publishes for that
+version. To upgrade, find the new version on
+<https://modrinth.com/mod/btwce/versions>, then bump
 `MOD_VERSION_ID`, `MOD_FILENAME`, and `MOD_SHA512` at the top of
 `start.sh`. To force a re-download, delete `mods/btwce-3.1.0.jar`.
 
-To upgrade the runtime bundle, create a new release with a new bundle,
-then bump `BUNDLE_VERSION` and `BUNDLE_SHA256` in `start.sh`.
+The server is launched with all 11 libraries + the Mojang server
+jar on the classpath, and the loader main class
+(`net.fabricmc.loader.impl.launch.knot.KnotServer`) as the program
+argument — no launch jar needed.
 
 ## Client side
 
