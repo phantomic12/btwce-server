@@ -1,20 +1,19 @@
 #!/bin/sh
 # start.sh — launch the BTWCE Minecraft server.
 #
-# Self-bootstrapping: on first run it downloads everything it needs
-# (Legacy Fabric 0.19.3 + 11 libraries + Mojang's 1.6.4 server jar from
-# the project's GitHub release; the BTWCE 3.1.0 mod from the Modrinth
-# CDN), then launches the server headless.
+# Self-bootstrapping: on first run it downloads every runtime file
+# (the Mojang 1.6.4 server jar from launcher.mojang.com, 11 library
+# jars from the legacy-fabric and fabricmc maven repos, and the BTWCE
+# mod from the Modrinth CDN), then launches the server headless.
 #
 # Requires:
 #   - Java 17+ on the system (BTWCE 3.1.0 declares depends: java >=17 <=21)
 #   - bash 4+ (we re-exec under bash because the rest of the script uses
 #     bash features — Pelican-style hosts that call `sh start.sh` still work)
-#   - curl, tar, awk, unzip
-#   - about 80 MB free disk (bundle + extracted + the 47 MB mod jar)
+#   - curl, awk, sha1sum, sha512sum
+#   - about 80 MB free disk (Mojang jar + libs + the 47 MB mod jar)
 #
-# Re-runs are instant: the bundle and mod are only downloaded if files
-# are missing.
+# Re-runs are instant: each file is only downloaded if it's missing.
 
 # POSIX-sh trampoline: re-exec under bash if we're not already running
 # under it. Pelican (and some other panels) invoke this script as
@@ -41,7 +40,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
 # --- preflight: required tools ---
-for tool in curl tar awk unzip; do
+for tool in curl awk sha1sum sha512sum; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "ERROR: '$tool' is required but not installed. Install it and re-run." >&2
     exit 1
@@ -89,16 +88,18 @@ fi
 if [[ "$JAVA_MAJOR" -gt 21 ]]; then
   echo "WARNING: $JAVA_BIN is Java $JAVA_MAJOR — BTWCE declares depends: java <=21." >&2
 fi
-echo "[1/4] Using Java: $("$JAVA_BIN" -version 2>&1 | head -1)"
+echo "[1/5] Using Java: $("$JAVA_BIN" -version 2>&1 | head -1)"
 
-# --- pinned versions / URLs / checksums ---
-# Bump these (and the matching bundle asset on the GitHub release) when
-# upgrading Legacy Fabric or libraries.
-BUNDLE_VERSION="v1.0.0"
-BUNDLE_URL="https://github.com/phantomic12/btwce-server/releases/download/${BUNDLE_VERSION}/libraries-bundle.tar.xz"
-BUNDLE_SHA256="6267d0d942b375f12ce5eadd63c29f8643ab7f49c0647eeeac7c16632e9eabf4"
+# --- pinned sources / checksums ---
+# Bump these when upgrading Legacy Fabric or libraries.
+#
+# Mojang: 1.6.4 server jar. The SHA1 is the URL's path segment — Mojang
+# distributes by-content-addressed, so the SHA1 is the integrity check.
+MOJANG_URL="https://launcher.mojang.com/v1/objects/050f93c1f3fe9e2052398f7bd6aca10c63d64a87/server.jar"
+MOJANG_SHA1="050f93c1f3fe9e2052398f7bd6aca10c63d64a87"
+MOJANG_FILE="downloads/mojang-1.6.4-server.jar"
 
-# BTWCE mod is fetched from the Modrinth CDN rather than the GitHub
+# BTWCE mod is fetched from the Modrinth CDN rather than a GitHub
 # release so the repo doesn't have to carry a 47 MB binary. To upgrade,
 # find the new version on https://modrinth.com/mod/btwce/versions, then
 # bump MOD_VERSION_ID, MOD_FILENAME, and MOD_SHA512. The project ID and
@@ -112,45 +113,117 @@ MOD_FILE="mods/${MOD_FILENAME}"
 MOD_URL="https://cdn.modrinth.com/data/${MOD_PROJECT_ID}/versions/${MOD_VERSION_ID}/${MOD_FILENAME}"
 MOD_SHA512="c51bfd3822ba7beff2c9973fce163d7bb6ba0d7082471b37dc63ca1b5b8772c7070a2fd1cd3344aaddd9d31b31ea3ff8f76469e37a4490147546a60c8d29dfa7"
 
-# --- preflight: runtime files ---
-# Bundle: Legacy Fabric + 11 libraries + Mojang 1.6.4 server jar.
-NEED_BUNDLE=0
-[[ -f "downloads/mojang-1.6.4-server.jar" ]] || NEED_BUNDLE=1
-[[ -d "libraries/net/fabricmc/fabric-loader" ]] || NEED_BUNDLE=1
-[[ -f "fabric-server-launch.jar" ]] || NEED_BUNDLE=1
+# Libraries: (maven_host | local_path) pairs. The URL is built as
+# https://<host>/<local_path_minus_libraries_prefix>. The SHA1 is fetched
+# live from the maven repo's `<url>.sha1` sidecar — same TOFU trust model
+# as the source jar. Bump these by changing the version segment.
+#
+# Host split is by maven group:
+#   * net.fabricmc.*  and  org.ow2.asm.*  → maven.fabricmc.net
+#   * net.legacyfabric.*  and  org.lwjgl.*  → maven.legacyfabric.net
+LIBS=(
+  "fabricmc.net|libraries/net/fabricmc/fabric-loader/0.19.3/fabric-loader-0.19.3.jar"
+  "fabricmc.net|libraries/net/fabricmc/sponge-mixin/0.17.3+mixin.0.8.7/sponge-mixin-0.17.3+mixin.0.8.7.jar"
+  "legacyfabric.net|libraries/net/legacyfabric/intermediary/1.6.4/intermediary-1.6.4.jar"
+  "legacyfabric.net|libraries/org/lwjgl/lwjgl/lwjgl-platform/2.9.4+legacyfabric.17/lwjgl-platform-2.9.4+legacyfabric.17-natives-linux.jar"
+  "legacyfabric.net|libraries/org/lwjgl/lwjgl/lwjgl/2.9.4+legacyfabric.17/lwjgl-2.9.4+legacyfabric.17.jar"
+  "legacyfabric.net|libraries/org/lwjgl/lwjgl/lwjgl_util/2.9.4+legacyfabric.17/lwjgl_util-2.9.4+legacyfabric.17.jar"
+  "fabricmc.net|libraries/org/ow2/asm/asm-analysis/9.10.1/asm-analysis-9.10.1.jar"
+  "fabricmc.net|libraries/org/ow2/asm/asm-commons/9.10.1/asm-commons-9.10.1.jar"
+  "fabricmc.net|libraries/org/ow2/asm/asm-tree/9.10.1/asm-tree-9.10.1.jar"
+  "fabricmc.net|libraries/org/ow2/asm/asm-util/9.10.1/asm-util-9.10.1.jar"
+  "fabricmc.net|libraries/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar"
+)
 
-# Mod: BTWCE itself.
-NEED_MOD=0
-[[ -f "$MOD_FILE" ]] || NEED_MOD=1
+# --- helpers ---
+# download_checked <url> <sha1> <dest>
+# Downloads to a temp file, sha1-verifies, then atomically moves into place.
+download_checked() {
+  local url="$1" sha1="$2" dest="$3"
+  mkdir -p "$(dirname "$dest")"
+  local tmp; tmp="$(mktemp --suffix=.part)"
+  if ! curl -fL --retry 3 --connect-timeout 30 -o "$tmp" "$url"; then
+    echo "ERROR: failed to download $url" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! echo "$sha1  $tmp" | sha1sum -c - >/dev/null 2>&1; then
+    echo "ERROR: $dest checksum mismatch (expected sha1 $sha1)" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+}
 
-if [[ $NEED_BUNDLE -eq 1 ]]; then
-  echo "[2/4] Runtime bundle missing, downloading from GitHub release..."
+# download_lib <host> <local_path>
+# Fetches a maven jar, then fetches its .sha1 sidecar and verifies.
+download_lib() {
+  local host="$1" path="$2"
+  local rel="${path#libraries/}"
+  local url="https://maven.${host}/${rel}"
+  local sha_url="${url}.sha1"
 
-  TMP_TAR="$(mktemp --suffix=.tar.xz)"
+  mkdir -p "$(dirname "$path")"
+  local tmp; tmp="$(mktemp --suffix=.part)"
 
-  if ! curl -fL --retry 3 --connect-timeout 15 -o "$TMP_TAR" "$BUNDLE_URL"; then
-    echo "ERROR: failed to download $BUNDLE_URL" >&2
-    rm -f "$TMP_TAR"
-    exit 1
+  if ! curl -fL --retry 3 --connect-timeout 30 -o "$tmp" "$url"; then
+    echo "ERROR: failed to download $url" >&2
+    rm -f "$tmp"
+    return 1
   fi
 
-  # Verify checksum (sha256sum is part of coreutils, always present)
-  if ! echo "$BUNDLE_SHA256  $TMP_TAR" | sha256sum -c - >/dev/null 2>&1; then
-    echo "ERROR: bundle checksum mismatch — refusing to extract" >&2
-    rm -f "$TMP_TAR"
-    exit 1
+  local expected_sha
+  if ! expected_sha="$(curl -fL --retry 3 --connect-timeout 15 "$sha_url" | awk '{print $1}')" \
+     || [[ -z "$expected_sha" ]]; then
+    echo "ERROR: failed to fetch $sha_url" >&2
+    rm -f "$tmp"
+    return 1
   fi
 
-  echo "  extracting..."
-  tar -xJf "$TMP_TAR"
-  rm -f "$TMP_TAR"
+  if ! echo "$expected_sha  $tmp" | sha1sum -c - >/dev/null 2>&1; then
+    echo "ERROR: $path checksum mismatch (expected sha1 $expected_sha)" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  mv "$tmp" "$path"
+}
+
+# --- [2/5] Mojang server jar ---
+if [[ ! -f "$MOJANG_FILE" ]]; then
+  echo "[2/5] Mojang 1.6.4 server jar missing, downloading..."
+  download_checked "$MOJANG_URL" "$MOJANG_SHA1" "$MOJANG_FILE"
   echo "  done."
 else
-  echo "[2/4] Runtime bundle present, skipping download."
+  echo "[2/5] Mojang 1.6.4 server jar present, skipping download."
 fi
 
-if [[ $NEED_MOD -eq 1 ]]; then
-  echo "[3/4] BTWCE mod missing, downloading from Modrinth CDN..."
+# --- [3/5] Libraries (Legacy Fabric + 10 transitive deps) ---
+NEED_LIBS=0
+for lib in "${LIBS[@]}"; do
+  IFS='|' read -r _ path <<< "$lib"
+  [[ -f "$path" ]] || { NEED_LIBS=1; break; }
+done
+
+if [[ $NEED_LIBS -eq 1 ]]; then
+  echo "[3/5] Libraries missing, downloading from maven..."
+  installed=0
+  for lib in "${LIBS[@]}"; do
+    IFS='|' read -r host path <<< "$lib"
+    if [[ -f "$path" ]]; then
+      continue
+    fi
+    download_lib "$host" "$path"
+    installed=$((installed+1))
+  done
+  echo "  $installed/${#LIBS[@]} libraries installed."
+else
+  echo "[3/5] Libraries present, skipping download."
+fi
+
+# --- [4/5] BTWCE mod (Modrinth CDN) ---
+if [[ ! -f "$MOD_FILE" ]]; then
+  echo "[4/5] BTWCE mod missing, downloading from Modrinth CDN..."
 
   mkdir -p mods
   TMP_JAR="$(mktemp --suffix=.jar)"
@@ -161,9 +234,7 @@ if [[ $NEED_MOD -eq 1 ]]; then
     exit 1
   fi
 
-  # Verify checksum (sha512sum is part of coreutils, always present).
-  # Modrinth signs everything with SHA512; we use that to keep parity
-  # with their published hashes.
+  # Modrinth publishes SHA512 for every file.
   if ! echo "$MOD_SHA512  $TMP_JAR" | sha512sum -c - >/dev/null 2>&1; then
     echo "ERROR: mod checksum mismatch — refusing to install" >&2
     rm -f "$TMP_JAR"
@@ -173,25 +244,43 @@ if [[ $NEED_MOD -eq 1 ]]; then
   mv "$TMP_JAR" "$MOD_FILE"
   echo "  done ($(du -h "$MOD_FILE" | cut -f1) installed)."
 else
-  echo "[3/4] BTWCE mod present, skipping download."
+  echo "[4/5] BTWCE mod present, skipping download."
 fi
 
-# Sanity check: if anything is missing after bootstrap, fail loud
-for f in downloads/mojang-1.6.4-server.jar fabric-server-launch.jar "$MOD_FILE"; do
+# Sanity check: every required file must exist after bootstrap.
+for f in "$MOJANG_FILE" "$MOD_FILE"; do
   if [[ ! -f "$f" ]]; then
     echo "ERROR: required file missing after bootstrap: $f" >&2
     exit 1
   fi
 done
+for lib in "${LIBS[@]}"; do
+  IFS='|' read -r _ path <<< "$lib"
+  if [[ ! -f "$path" ]]; then
+    echo "ERROR: required library missing after bootstrap: $path" >&2
+    exit 1
+  fi
+done
 
-# --- launch ---
-echo "[4/4] Starting BTWCE server (MC 1.6.4 + Legacy Fabric 0.19.3 + BTWCE 3.1.0)..."
+# --- [5/5] Launch ---
+# Build the classpath: every library + the Mojang server jar.
+# Java's -cp accepts ":"-separated paths on Linux/macOS, ";" on Windows.
+# We don't ship a Windows story; the colon separator is fine for the
+# targets start.sh is designed for (Linux panel hosts).
+CP=""
+for lib in "${LIBS[@]}"; do
+  IFS='|' read -r _ path <<< "$lib"
+  CP="${CP:+$CP:}${path}"
+done
+CP="${CP}:${MOJANG_FILE}"
+
+echo "[5/5] Starting BTWCE server (MC 1.6.4 + Legacy Fabric 0.19.3 + BTWCE 3.1.0)..."
 echo "      console is in this terminal. Type 'help' for commands. Ctrl+C stops."
 echo
 mkdir -p logs
 exec "$JAVA_BIN" \
   -Djava.awt.headless=true \
-  -Dfabric.gameJarPath=downloads/mojang-1.6.4-server.jar \
+  -Dfabric.gameJarPath="$MOJANG_FILE" \
   -Xms1G -Xmx4G \
   -XX:+UseG1GC \
   -XX:+ParallelRefProcEnabled \
@@ -207,4 +296,6 @@ exec "$JAVA_BIN" \
   -XX:SurvivorRatio=32 \
   -XX:+PerfDisableSharedMem \
   -XX:MaxTenuringThreshold=1 \
-  -jar fabric-server-launch.jar nogui
+  -cp "$CP" \
+  net.fabricmc.loader.impl.launch.knot.KnotServer \
+  nogui
