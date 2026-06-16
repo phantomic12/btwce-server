@@ -13,14 +13,18 @@ That's it. `start.sh` will:
 2. Download a runtime bundle (~14 MB) from the GitHub release
    (Legacy Fabric + 11 libraries + Mojang's 1.6.4 server jar + the
    manifest-only launch jar)
-3. Verify the bundle checksum
-4. Extract it
-5. Launch the server on port 25565, headless
+3. Download the BTWCE mod jar (~46 MB) from the Modrinth CDN
+   (the same upstream release published on Modrinth — see
+   <https://modrinth.com/mod/btwce/versions>)
+4. Verify both downloads' checksums
+5. Extract the bundle and launch the server on port 25565, headless
 
-Re-runs are instant — the bundle is only downloaded once, then kept locally.
+Re-runs are instant — the bundle and the mod are each only downloaded
+once, then kept locally.
 
-The BTWCE mod itself is committed in `mods/btwce-3.1.0.jar` (the
-unmodified upstream release from Modrinth).
+The BTWCE mod is **not** committed in the repo; it lives only in
+`mods/btwce-3.1.0.jar` after a successful bootstrap, and is
+re-downloaded by `start.sh` whenever that file is missing.
 
 ## What you get
 
@@ -43,18 +47,22 @@ stop.sh                # graceful shutdown (RCON + signals)
 backup.sh              # tarball world/ into backups/ (prune to 24)
 server.properties      # server config (motd, difficulty, port, ...)
 eula.txt               # eula=true
-mods/btwce-3.1.0.jar   # the mod itself
+mods/.gitkeep          # keeps the (otherwise empty) mods/ directory
 README.md
 LICENSE                # MIT
 ```
 
-Files **not** in the repo (downloaded from the GitHub release on first run):
+Files **not** in the repo (downloaded on first run by `start.sh`):
 
 ```
+# from the GitHub release (the runtime bundle)
 downloads/mojang-1.6.4-server.jar
 libraries/             # fabric loader + transitive deps
 fabric-server-launch.jar
 install-info.json
+
+# from the Modrinth CDN (the mod)
+mods/btwce-3.1.0.jar
 ```
 
 Created at runtime by the server itself:
@@ -101,7 +109,12 @@ and re-exec under `bash` if available. The same script works for:
 * Pelican: configured to run `sh start.sh` (the default for a custom
   startup command) — the script trampolines to bash on its own
 
-## How the bundle works
+## How the bootstrap works
+
+`start.sh` does two independent fetches on first run, each with a
+versioned checksum, and only re-fetches when the local file is missing.
+
+**1. Runtime bundle — from the GitHub release**
 
 The GitHub release `v1.0.0` has a `libraries-bundle.tar.xz` asset
 containing the runtime files:
@@ -114,21 +127,34 @@ install-info.json
 ```
 
 On first run, `start.sh` downloads this bundle, sha256-verifies it
-against the embedded checksum, and `tar -xJf`s it in place. Subsequent
-runs skip the download entirely.
+against the embedded checksum, and `tar -xJf`s it in place.
 
-To upgrade the loader or libraries, create a new release with a new
-bundle, then bump `BUNDLE_VERSION` and `BUNDLE_SHA256` in `start.sh`.
+**2. BTWCE mod — from the Modrinth CDN**
+
+The mod is fetched directly from
+`https://cdn.modrinth.com/data/PiC4CKoa/versions/Pbz5N4Ul/btwce-3.1.0.jar`
+(the same file Modrinth publishes for
+<https://modrinth.com/mod/btwce/version/3.1.0>) and dropped into
+`mods/btwce-3.1.0.jar`. The download is sha512-verified against the
+hash Modrinth publishes for that version. To upgrade, find the new
+version on <https://modrinth.com/mod/btwce/versions>, then bump
+`MOD_VERSION_ID`, `MOD_FILENAME`, and `MOD_SHA512` at the top of
+`start.sh`. To force a re-download, delete `mods/btwce-3.1.0.jar`.
+
+To upgrade the runtime bundle, create a new release with a new bundle,
+then bump `BUNDLE_VERSION` and `BUNDLE_SHA256` in `start.sh`.
 
 ## Client side
 
 Connect from a Minecraft 1.6.4 client with the same BTWCE 3.1.0 mod
-installed. The client mod jar is the same file as `mods/btwce-3.1.0.jar`
-(it's required on both client and server).
+installed. The client mod jar is the same file `start.sh` downloads to
+`mods/btwce-3.1.0.jar` on the server (it is required on both client
+and server). To install the same mod on the client, download it from
+Modrinth:
 
-* Download: <https://modrinth.com/mod/btwce/versions>
-* Wiki: <https://wiki.btwce.com/>
-* Discord: <https://discord.btwce.com/>
+* <https://modrinth.com/mod/btwce/versions>
+* <https://wiki.btwce.com/>
+* <https://discord.btwce.com/>
 
 ## Customizing server.properties
 
@@ -158,4 +184,5 @@ The committed `server.properties` is a sane default. **Change
 ## License
 
 MIT. The BTWCE mod is CC-BY-4.0 (`mods/btwce-3.1.0.jar` is the
-unmodified upstream release from <https://modrinth.com/mod/btwce>).
+unmodified upstream release fetched from the Modrinth CDN at
+<https://modrinth.com/mod/btwce>).
