@@ -21,6 +21,11 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Mods are downloaded from the Modrinth CDN by start.sh
+# (mods/ directory is tracked via .gitkeep)
+mods/*.jar
+!mods/.gitkeep
+
 # Mojang server empty list files
 ops.txt
 white-list.txt
